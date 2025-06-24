@@ -1,116 +1,196 @@
 import logging
 import os
 import time
-import openai
+import requests
+from openai import OpenAI
 from plexapi.server import PlexServer
+from plexapi.exceptions import NotFound
+from plexapi.video import Show  # Important: to ensure we only add full Show objects
 from utils.classes import UserInputs
 
+# Load configuration from environment variables
 userInputs = UserInputs(
     plex_url=os.getenv("PLEX_URL"),
     plex_token=os.getenv("PLEX_TOKEN"),
     openai_key=os.getenv("OPEN_AI_KEY"),
-    library_name=os.getenv("LIBRARY_NAME"),
+    library_names=os.getenv("LIBRARY_NAMES").split(","),
     collection_title=os.getenv("COLLECTION_TITLE"),
     history_amount=int(os.getenv("HISTORY_AMOUNT")),
     recommended_amount=int(os.getenv("RECOMMENDED_AMOUNT")),
     minimum_amount=int(os.getenv("MINIMUM_AMOUNT")),
     wait_seconds=int(os.getenv("SECONDS_TO_WAIT", 86400)),
+    add_to_watchlist=bool(int(os.getenv("ADD_TO_WATCHLIST", "1"))),
+    create_collections=bool(int(os.getenv("CREATE_COLLECTIONS", "1"))),
 )
 
+requests.packages.urllib3.disable_warnings()
 logger = logging.getLogger()
 logging.basicConfig(level=logging.INFO)
 
-openai.api_key = userInputs.openai_key
 
-def create_collection(plex, movie_items, description, library):
-    logging.info("Finding matching movies in your library...")
-    movie_list = []
-    for item in movie_items:
-        movie_search = plex.search(item, mediatype="movie", limit=3)
-        if len(movie_search) > 0:
-            movie_list.append(movie_search[0])
-            logging.info(item + " - found")
+def fetch_library_contents(library):
+    try:
+        account_id = library._server.systemAccounts()[1].accountID
+        logging.info(f"Fetching last 20 watched items from library: {library.title}")
+        history_items = library._server.history(
+            librarySectionID=library.key,
+            maxresults=20,
+            accountID=account_id
+        )
+
+        titles = set()
+        for item in history_items:
+            title = None
+            if hasattr(item, 'grandparentTitle') and item.grandparentTitle:
+                title = item.grandparentTitle
+            elif hasattr(item, 'title') and item.title:
+                title = item.title
+
+            if isinstance(title, str) and title.strip():
+                titles.add(title.strip())
+
+        title_list = list(titles)
+        logging.info(f"Collected {len(title_list)} unique titles from watch history for '{library.title}'")
+        return title_list
+
+    except Exception as e:
+        logging.error(f"Failed to fetch watch history for '{library.title}': {e}")
+        return []
+
+
+def create_collection(plex, items, description, library, mediatype, collection_title):
+    logging.info(f"Creating or updating collection '{collection_title}' in library '{library.title}'...")
+    item_list = []
+    for item in items:
+        search_results = plex.search(item.strip(), mediatype=mediatype, limit=3)
+
+        # Only include Show objects for TV shows
+        if mediatype == "show":
+            found_item = next((res for res in search_results if isinstance(res, Show)), None)
         else:
-            logging.info(item + " - not found")
+            found_item = search_results[0] if search_results else None
 
-    if len(movie_list) > userInputs.minimum_amount:
+        if found_item:
+            item_list.append(found_item)
+            logging.info(f"{item} - found")
+        else:
+            logging.info(f"{item} - not found or incorrect type")
+
+    if len(item_list) > userInputs.minimum_amount:
         try:
-            collection = library.collection(userInputs.collection_title)
+            collection = library.collection(collection_title)
             collection.removeItems(collection.items())
-            collection.addItems(movie_list)
+            collection.addItems(item_list)
             collection.editSummary(description)
-            logging.info("Updated pre-existing collection")
-        except:
+            logging.info(f"Updated pre-existing collection: {collection_title}")
+        except Exception:
+            logging.info(f"Creating new collection: {collection_title}")
             collection = plex.createCollection(
-                title=userInputs.collection_title,
-                section=userInputs.library_name,
-                items=movie_list
+                title=collection_title,
+                section=library.title,
+                items=item_list
             )
             collection.editSummary(description)
-            logging.info("Added new collection")
+            logging.info(f"Added new collection: {collection_title}")
     else:
-        logging.info("Not enough movies were found")
+        logging.info(f"Not enough items were found to create or update the collection: {collection_title}")
+
+
+def add_to_watchlist(plex, recommendations, mediatype):
+    account = plex.myPlexAccount()
+    logging.info("Adding recommendations to watchlist...")
+    for title in recommendations:
+        try:
+            search_results = account.search(title.strip(), mediatype=mediatype)
+            if search_results:
+                item = search_results[0]
+                item.addToWatchlist()
+                logging.info(f"Added to watchlist: {title}")
+            else:
+                logging.info(f"Not found in global Plex database: {title}")
+        except NotFound:
+            logging.warning(f"Item not found: {title}")
+        except Exception as e:
+            logging.error(f"Failed to add {title} to watchlist: {e}")
+
 
 def run():
-    # Connect
     while True:
         logger.info("Starting collection run")
         try:
-            plex = PlexServer(userInputs.plex_url, userInputs.plex_token)
+            session = requests.Session()
+            session.verify = False
+            plex = PlexServer(userInputs.plex_url, userInputs.plex_token, session=session)
             logging.info("Connected to Plex server")
         except Exception as e:
-            logging.error("Plex Authorization error")
+            logging.error("Plex Authorization error", exc_info=e)
             return
 
         try:
-            # Find history items for the library
-            library = plex.library.section(userInputs.library_name)
-            account_id = plex.systemAccounts()[1].accountID
+            all_recommendations = {}
+            for library_name in userInputs.library_names:
+                library = plex.library.section(library_name)
+                mediatype = "show" if library.type == "show" else "movie"
+                logging.info(f"Processing library: {library_name} (type: {mediatype})")
 
-            # a = library.hubs()
+                # Sanitize titles
+                history_items_titles = [
+                    item.title.strip()
+                    for item in plex.history(
+                        librarySectionID=library.key,
+                        maxresults=userInputs.history_amount,
+                        accountID=plex.systemAccounts()[0].accountID
+                    )
+                    if isinstance(item.title, str) and item.title.strip()
+                ]
 
-            items_string = ""
-            history_items_titles = []
-            watch_history_items = plex.history(librarySectionID=library.key, maxresults=userInputs.history_amount, accountID=account_id)
-            logging.info("Fetching items from your watch history")
+                combined_items_string = ", ".join(history_items_titles)
 
-            for history_item in watch_history_items:
-                history_items_titles.append(history_item.title)
+                query = (
+                    f"Based on the following {'shows' if mediatype == 'show' else 'movies'} I've watched: "
+                    f"{combined_items_string}. "
+                    "Please provide new and unique recommendations that are not in this list. "
+                    f"I need around {userInputs.recommended_amount}. "
+                    "Format your response as a comma-separated list of titles, followed by '+++' and a brief explanation of your recommendations. "
+                    "Do not include any titles from the input list in your response."
+                )
 
-            items_string = ", ".join(history_items_titles)
-            logging.info("Found " + items_string + " to base recommendations off")
+                try:
+                    logging.info(f"Querying OpenAI for recommendations for library: {library_name}")
+                    client = OpenAI(api_key=userInputs.openai_key)
+                    chat_completion = client.chat.completions.create(
+                        model="gpt-3.5-turbo",
+                        messages=[{"role": "user", "content": query}]
+                    )
+                    ai_result = chat_completion.choices[0].message.content
+                    logging.info(f"AI response for library '{library_name}': {ai_result}")
+
+                    ai_result_split = ai_result.split("+++")
+                    recommendations = [t.strip() for t in ai_result_split[0].split(",") if t.strip()]
+                    description = ai_result_split[1].strip() if len(ai_result_split) > 1 else ""
+                    all_recommendations[library_name] = (recommendations, description)
+                except Exception as e:
+                    logging.error(f"OpenAI query failed for library '{library_name}'", exc_info=e)
 
         except Exception as e:
-            logging.error("Failed to get watched items")
+            logging.error("Error during library processing", exc_info=e)
             return
 
-        try:
-            query = "Can you give me movie recommendations based on what I've watched? "
-            query += "I've watched " + items_string + ". "
-            query += "Can you base your recommendations solely on what I've watched already. "
-            query += "I need around " + str(userInputs.recommended_amount) + ". "
-            query += "Please give me the comma separated result, and then a short explanation separated from the movie values, separated by 3 pluses like '+++'."
-            query += "Not a numbered list. "
+        for library_name, (recommendations, description) in all_recommendations.items():
+            if recommendations:
+                library = plex.library.section(library_name)
+                mediatype = "show" if library.type == "show" else "movie"
+                collection_title = f"{userInputs.collection_title} - {library_name}"
 
-            # create a chat completion
-            logging.info("Querying openai for recommendations...")
-            chat_completion = openai.ChatCompletion.create(model="gpt-3.5-turbo", messages=[{"role": "user", "content": query}])
-            ai_result = chat_completion.choices[0].message.content
-            ai_result_split = ai_result.split("+++")
-            ai_movie_recommendations = ai_result_split[0]
-            ai_movie_description = ai_result_split[1]
+                if userInputs.create_collections:
+                    create_collection(plex, recommendations, description, library, mediatype, collection_title)
 
-            movie_items = list(filter(None,  ai_movie_recommendations.split(",")))
-            logging.info("Query success!")
-        except:
-            logging.error('Was unable to query openai')
-            return
-
-        if len(movie_items) > 0:
-            create_collection(plex, movie_items, ai_movie_description, library)
+                if userInputs.add_to_watchlist:
+                    add_to_watchlist(plex, recommendations, mediatype)
 
         logging.info("Waiting on next call...")
         time.sleep(userInputs.wait_seconds)
+
 
 if __name__ == '__main__':
     run()
