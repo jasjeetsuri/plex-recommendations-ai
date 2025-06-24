@@ -1,2 +1,2 @@
-plexapi==4.13.4
-openai==0.27.6
+plexapi==4.16.0
+openai==1.55.3
