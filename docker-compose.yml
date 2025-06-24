@@ -1,16 +1,20 @@
-version: "2.1"
+version: '3.8'
 services:
   plex-recommendations:
-    image: silkychap/plex-recommendations-ai:latest
-    container_name: plex-recommendations
+    image: plex-ai
+    container_name: plex-ai-recommendations
     environment:
-      - PLEX_URL=<local plex url>
-      - PLEX_TOKEN=<plex token>
-      - OPEN_AI_KEY=<open ai key>
-      - LIBRARY_NAME=<library name>
-      - COLLECTION_TITLE=<title>
-      - HISTORY_AMOUNT=<amount>
-      - RECOMMENDED_AMOUNT=<amount>
-      - MINIMUM_AMOUNT=<amount>
-      - SECONDS_TO_WAIT=<amount>
+      - PLEX_URL=http://plex:32400
+      - PLEX_TOKEN=bEErMWUKf_oJdzmeN7P_
+      - OPEN_AI_KEY=
+      - LIBRARY_NAMES=Movies,TV Shows
+      - COLLECTION_TITLE=Your Recommendations
+      - HISTORY_AMOUNT=60
+      - RECOMMENDED_AMOUNT=20
+      - MINIMUM_AMOUNT=0
+      - SECONDS_TO_WAIT=86400
+      - ADD_TO_WATCHLIST=0
+      - CREATE_COLLECTIONS=1
     restart: unless-stopped
+    networks:
+      -  arr
