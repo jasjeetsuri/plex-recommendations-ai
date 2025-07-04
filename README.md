@@ -10,6 +10,10 @@ With this feature, you'll easily discover a handful of delightful recommendation
 - Dynamic results based on ChatGPT results and Plex watch history.
 - Creates a short description on the plex collection describing why it chose them movies.
 
+![image](https://github.com/user-attachments/assets/bb0f0da7-baf5-466a-836b-618c3a14edde)
+
+![image](https://github.com/user-attachments/assets/b87b846e-f6a1-4344-af0f-38953fcf4d3d)
+
 ## Notice!!
 
 Since this links into your OpenAI account there will be some cost with each query to ChatGPT, so make sure you keep an eye on it!
