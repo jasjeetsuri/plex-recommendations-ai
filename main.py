@@ -23,6 +23,9 @@ userInputs = UserInputs(
     create_collections=bool(int(os.getenv("CREATE_COLLECTIONS", "1"))),
 )
 
+# Get target username from environment variable
+target_username = "safetyp1"
+
 requests.packages.urllib3.disable_warnings()
 logger = logging.getLogger()
 logging.basicConfig(level=logging.INFO)
@@ -127,66 +130,123 @@ def run():
             return
 
         try:
-            all_recommendations = {}
-            for library_name in userInputs.library_names:
-                library = plex.library.section(library_name)
-                mediatype = "show" if library.type == "show" else "movie"
-                logging.info(f"Processing library: {library_name} (type: {mediatype})")
+            # Get all system accounts
+            all_accounts = plex.systemAccounts()
+            logging.info(f"Found {len(all_accounts)} system accounts")
+            
+            # Store all recommendations for all users and libraries
+            all_user_recommendations = {}
+            
+            # Iterate through all accounts (skip the first account)
+            for account in all_accounts[1:]:
+                account_name = getattr(account, 'name', f'Unknown_{account.accountID}')
+                logging.info(f"Processing account: {account_name} (ID: {account.accountID})")
+                
+                user_recommendations = {}
+                
+                # Process each library for this user
+                for library_name in userInputs.library_names:
+                    library = plex.library.section(library_name)
+                    mediatype = "show" if library.type == "show" else "movie"
+                    logging.info(f"Processing library: {library_name} (type: {mediatype}) for user: {account_name}")
 
-                # Sanitize titles
-                history_items_titles = [
-                    item.title.strip()
-                    for item in plex.history(
-                        librarySectionID=library.key,
-                        maxresults=userInputs.history_amount,
-                        accountID=plex.systemAccounts()[0].accountID
+                    # Get watch history for this specific user
+                    try:
+                        history_items = plex.history(
+                            librarySectionID=library.key,
+                            maxresults=userInputs.history_amount,
+                            accountID=account.accountID
+                        )
+                        
+                        titles = set()
+                        for item in history_items:
+                            title = None
+                            # For TV shows, use grandparentTitle (show name) instead of title (episode name)
+                            if hasattr(item, 'grandparentTitle') and item.grandparentTitle:
+                                title = item.grandparentTitle
+                            elif hasattr(item, 'title') and item.title:
+                                title = item.title
+
+                            if isinstance(title, str) and title.strip():
+                                titles.add(title.strip())
+
+                        history_items_titles = list(titles)
+                    except Exception as e:
+                        logging.warning(f"Could not get history for user '{account_name}' in library '{library_name}': {e}")
+                        continue
+
+                    logging.info(f"Found {len(history_items_titles)} titles in watch history for '{library_name}' - User: {account_name}: {history_items_titles}")
+                    
+                    # Skip if user has no watch history for this library
+                    if not history_items_titles:
+                        logging.info(f"No watch history found for user '{account_name}' in library '{library_name}', skipping...")
+                        continue
+                    
+                    combined_items_string = ", ".join(history_items_titles)
+                    logging.info(f"Combined titles string for GPT request - User: {account_name}: {combined_items_string}")
+
+                    query = (
+                        f"Based on the following {'shows' if mediatype == 'show' else 'movies'} I've watched: "
+                        f"{combined_items_string}. "
+                        "Please provide new and unique recommendations that are not in this list. "
+                        f"I need around {userInputs.recommended_amount}. "
+                        "Focus on titles from the last 10 years in similar genres. "
+                        "Only recommend titles with IMDb ratings above 7.0 or Rotten Tomatoes scores above 80%. "
+                        "Prefer titles available on major streaming platforms like Netflix, Amazon Prime, Hulu, Disney+, HBO Max, or Apple TV+. "
+                        "Consider similar genres, themes, and storytelling styles. "
+                        "\n\nIMPORTANT: Format your response EXACTLY as follows:\n"
+                        "Title1, Title2, Title3, Title4, Title5+++Brief explanation of recommendations\n\n"
+                        "ONLY provide the title names in the first part, NO descriptions or additional text before the +++. "
+                        "Do not include any titles from the input list in your response."
                     )
-                    if isinstance(item.title, str) and item.title.strip()
-                ]
 
-                combined_items_string = ", ".join(history_items_titles)
+                    try:
+                        logging.info(f"Querying OpenAI for recommendations for library: {library_name} - User: {account_name}")
+                        client = OpenAI(api_key=userInputs.openai_key)
+                        chat_completion = client.chat.completions.create(
+                            model="gpt-3.5-turbo",
+                            messages=[{"role": "user", "content": query}]
+                        )
+                        ai_result = chat_completion.choices[0].message.content
+                        logging.info(f"AI response for library '{library_name}' - User: {account_name}: {ai_result}")
 
-                query = (
-                    f"Based on the following {'shows' if mediatype == 'show' else 'movies'} I've watched: "
-                    f"{combined_items_string}. "
-                    "Please provide new and unique recommendations that are not in this list. "
-                    f"I need around {userInputs.recommended_amount}. "
-                    "Format your response as a comma-separated list of titles, followed by '+++' and a brief explanation of your recommendations. "
-                    "Do not include any titles from the input list in your response."
-                )
-
-                try:
-                    logging.info(f"Querying OpenAI for recommendations for library: {library_name}")
-                    client = OpenAI(api_key=userInputs.openai_key)
-                    chat_completion = client.chat.completions.create(
-                        model="gpt-3.5-turbo",
-                        messages=[{"role": "user", "content": query}]
-                    )
-                    ai_result = chat_completion.choices[0].message.content
-                    logging.info(f"AI response for library '{library_name}': {ai_result}")
-
-                    ai_result_split = ai_result.split("+++")
-                    recommendations = [t.strip() for t in ai_result_split[0].split(",") if t.strip()]
-                    description = ai_result_split[1].strip() if len(ai_result_split) > 1 else ""
-                    all_recommendations[library_name] = (recommendations, description)
-                except Exception as e:
-                    logging.error(f"OpenAI query failed for library '{library_name}'", exc_info=e)
+                        ai_result_split = ai_result.split("+++")
+                        recommendations = [t.strip() for t in ai_result_split[0].split(",") if t.strip()]
+                        description = ai_result_split[1].strip() if len(ai_result_split) > 1 else ""
+                        user_recommendations[library_name] = (recommendations, description)
+                    except Exception as e:
+                        logging.error(f"OpenAI query failed for library '{library_name}' - User: {account_name}", exc_info=e)
+                
+                # Store this user's recommendations if they have any
+                if user_recommendations:
+                    all_user_recommendations[account_name] = user_recommendations
 
         except Exception as e:
             logging.error("Error during library processing", exc_info=e)
             return
 
-        for library_name, (recommendations, description) in all_recommendations.items():
-            if recommendations:
-                library = plex.library.section(library_name)
-                mediatype = "show" if library.type == "show" else "movie"
-                collection_title = f"{userInputs.collection_title} - {library_name}"
+        # Create collections for each user
+        for account_name, user_recommendations in all_user_recommendations.items():
+            logging.info(f"Creating collections for user: {account_name}")
+            
+            for library_name, (recommendations, description) in user_recommendations.items():
+                if recommendations:
+                    library = plex.library.section(library_name)
+                    mediatype = "show" if library.type == "show" else "movie"
+                    
+                    # Set collection title based on username
+                    if account_name == "safetyp1":
+                        collection_title = f"{userInputs.collection_title} - {library_name}"
+                    else:
+                        collection_title = f"{userInputs.collection_title} - {library_name} - For {account_name}"
 
-                if userInputs.create_collections:
-                    create_collection(plex, recommendations, description, library, mediatype, collection_title)
+                    if userInputs.create_collections:
+                        create_collection(plex, recommendations, description, library, mediatype, collection_title)
 
-                if userInputs.add_to_watchlist:
-                    add_to_watchlist(plex, recommendations, mediatype)
+                    # Note: Watchlist is personal, so we can't add to other users' watchlists
+                    # Only add to watchlist if this is the current user's recommendations
+                    if userInputs.add_to_watchlist and account_name == target_username:
+                        add_to_watchlist(plex, recommendations, mediatype)
 
         logging.info("Waiting on next call...")
         time.sleep(userInputs.wait_seconds)
