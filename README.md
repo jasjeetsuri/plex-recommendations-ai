@@ -6,7 +6,7 @@ With this feature, you'll easily discover a handful of delightful recommendation
 
 ## Features
 
-- Auto create/update a plex movie collection.
+- Auto create/update a plex movie and tv collections per user.
 - Dynamic results based on ChatGPT results and Plex watch history.
 - Creates a short description on the plex collection describing why it chose them movies.
 
@@ -31,29 +31,32 @@ Changing `SECONDS_TO_WAIT` to run too often will obviously increase the costs as
 
 You'll need docker set up on your server and to best way to run this is through docker-compose.
 
+Replace all instances of "safetyp1" with yoir username in ```main.py```.
+
+Build the docker image
+```sudo docker build -t plex-ai .```
+
 Use this example below:
 
 ```yaml
 version: "2.1"
 services:
   plex-recommendations:
-    image: silkychap/plex-recommendations-ai:latest
+    image: plex-ai
     container_name: plex-recommendations
     environment:
       - PLEX_URL=<local plex url>
       - PLEX_TOKEN=<plex token>
       - OPEN_AI_KEY=<open ai key>
-      - LIBRARY_NAME=<library name>
+      - LIBRARY_NAMES=Movies, TV Shows
       - COLLECTION_TITLE=<title>
       - HISTORY_AMOUNT=<amount> # How far it will look into your plex watch history
       - RECOMMENDED_AMOUNT=<amount> # How many recommendations it will request
       - MINIMUM_AMOUNT=<amount> # The minimum amount of matches it will need to create the collection
       - SECONDS_TO_WAIT=<amount> # How long in seconds it will wait to call again (default: 86400)
+      - ADD_TO_WATCHLIST=0
+      - CREATE_COLLECTIONS=
     restart: unless-stopped
 ```
-
-## Stuff to do / to add
-- Implement individual user collections for managed users (if possible?).
-- Create more configurable options cater the movie list.
-- Add TV shows functionality.
+## Stuff to do
 - Allow matching data past 2021?
